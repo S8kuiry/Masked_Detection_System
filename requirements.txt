@@ -1,4 +1,6 @@
-tensorflow
+streamlit
+streamlit-webrtc
 opencv-python
-scikit-learn
-matplotlib
+tensorflow
+av
+numpy
