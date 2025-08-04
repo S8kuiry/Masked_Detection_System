@@ -1,116 +1,55 @@
+# app.py
 import streamlit as st
 import cv2
+import av
 import numpy as np
-import time
-import os
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
-# --- Page Styling ---
-st.set_page_config(page_title="Mask Detection", layout="centered")
+# Load model
+@st.cache_resource
+def load_model_and_cascade():
+    model = load_model("mask_detector.keras")
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    return model, face_cascade
 
-# Title
-st.markdown(
-    """
-    <div style='margin-top:-60px;margin-bottom:30px; display: flex; align-items: center; justify-content: center; height: 100px;'>
-        <h1 style='margin: 0;'>Mask Detection System 😷</h1>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+model, face_cascade = load_model_and_cascade()
 
-# Custom Button Styling
-st.markdown("""
-    <style>
-    div.stButton > button {
-        border: 2px solid #4CAF50;
-        color: white;
-        border-radius: 10px;
-        height: 3em;
-        width: 100%;
-        font-size: 1.1em;
-        font-weight: 600;
-        transition: 0.3s ease;
-    }
-    div.stButton > button:hover {
-        border-color:red;
-        color:white;
-        transform: scale(1.05);
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- Constants for Distance Estimation ---
-KNOWN_DISTANCE = 50  # in cm
-KNOWN_WIDTH = 14     # in cm (approximate face width)
-FOCAL_LENGTH = 580   # calibrated for your camera
+# Distance Estimation Constants
+KNOWN_DISTANCE = 50  # cm
+KNOWN_WIDTH = 14     # cm
+FOCAL_LENGTH = 580
 
 def estimate_distance(focal_length, known_width, width_in_frame):
     return (known_width * focal_length) / width_in_frame
 
-# --- Load Model and Face Detector ---
-@st.cache_resource
-def load_detection_resources():
-    if not os.path.exists("mask_detector.keras"):
-        st.error("Model file 'mask_detector.keras' not found.")
-        st.stop()
+# WebRTC Video Processor
+class VideoProcessor(VideoProcessorBase):
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        faces = face_cascade.detectMultiScale(img, 1.1, 5)
 
-    try:
-        model = load_model("mask_detector.keras")
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        st.stop()
+        for (x, y, w, h) in faces:
+            face = img[y:y+h, x:x+w]
+            resized = cv2.resize(face, (100, 100))
+            input_img = preprocess_input(resized)
+            input_img = np.expand_dims(input_img, axis=0)
+            prediction = model.predict(input_img, verbose=0)
+            label = np.argmax(prediction)
+            label_text = "Mask" if label == 0 else "No Mask"
+            color = (0, 255, 0) if label == 0 else (0, 0, 255)
+            distance = estimate_distance(FOCAL_LENGTH, KNOWN_WIDTH, w)
 
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    return model, face_cascade
+            cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
+            cv2.putText(img, label_text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            cv2.putText(img, f"{int(distance)} cm", (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-model, face_cascade = load_detection_resources()
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- UI Controls ---
-if 'run' not in st.session_state:
-    st.session_state.run = False
+# UI
+st.set_page_config(page_title="Mask Detection Web", layout="centered")
 
-col1, col2, col3, col4, col5 = st.columns([1, 2, 2, 2, 1])
-with col2:
-    if st.button("▶ Start Detection"):
-        st.session_state.run = True
-with col4:
-    if st.button("⏹ Stop Detection"):
-        st.session_state.run = False
+st.markdown("<h1 style='text-align:center;'>😷 Mask Detection System</h1>", unsafe_allow_html=True)
 
-# --- Webcam Stream ---
-frame_placeholder = st.empty()
-cap = cv2.VideoCapture(0)
-
-while st.session_state.run:
-    ret, frame = cap.read()
-    if not ret:
-        st.warning("Webcam not accessible.")
-        break
-
-    faces = face_cascade.detectMultiScale(frame, scaleFactor=1.1, minNeighbors=5)
-
-    for x, y, w, h in faces:
-        distance = estimate_distance(FOCAL_LENGTH, KNOWN_WIDTH, w)
-        face = frame[y:y+h, x:x+w]
-        face = cv2.resize(face, (100, 100))
-        face = preprocess_input(face)
-        face = np.expand_dims(face, axis=0)
-
-        prediction = model.predict(face, verbose=0)
-        label = np.argmax(prediction)
-
-        label_text = "Mask" if label == 0 else "No Mask"
-        color = (0, 255, 0) if label == 0 else (0, 0, 255)
-
-        cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-        cv2.putText(frame, label_text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        cv2.putText(frame, f"{int(distance)} cm", (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    frame_placeholder.image(frame, channels="RGB")
-
-    time.sleep(0.03)
-
-cap.release()
-frame_placeholder.empty()
+webrtc_streamer(key="mask-detect", video_processor_factory=VideoProcessor)
